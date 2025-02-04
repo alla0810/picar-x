@@ -21,7 +21,7 @@ def main():
     print(manual)
 
     flag_bgm = False
-    music.music_set_volume(20)
+    music.music_set_volume(200)
     tts.lang("en-US")
 
     while True:
@@ -31,7 +31,7 @@ def main():
             flag_bgm = not flag_bgm
             if flag_bgm is True:
                 print('Play Music')
-                music.music_play('../musics/slow-trail-Ahjay_Stelino.mp3')
+                music.music_play('../musics/good-vibes.mp3')
             else:
                 print('Stop Music')
                 music.music_stop()
