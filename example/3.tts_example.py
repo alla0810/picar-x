@@ -47,7 +47,11 @@ def main():
             sleep(0.05)
 
         elif key == "t":
+<<<<<<< HEAD
             words = "Hello, My name is Angela"
+=======
+            words = "Hello, My name is Angela, Nice to meet you" 
+>>>>>>> 2fee8925888bac1a3c8cad60bdff5b69c562b8d8
             print(f'{words}')
             tts.say(words)
 
