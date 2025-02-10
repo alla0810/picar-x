@@ -81,12 +81,13 @@ class PicarXMapping:
 
     def print_map(self):
         """ Print the current map representation """
-        RED = "\033[41m  \033[0m"  # Red background for obstacles (1)
-        WHITE = "\033[47m  \033[0m" # White background for empty space (0)
+        RED = "\033[31m"  # Red color for obstacles (1)
+        WHITE = "\033[37m" # White color for empty space (0)
+        RESET = "\033[0m" # Reset color
 
         print("\nCurrent Map:")
         for row in self.grid:
-            print("".join(RED if cell == 1 else WHITE for cell in row))
+            print("".join(f"{RED}1{RESET}" if cell == 1 else f"{WHITE}0{RESET}" for cell in row))
 
 if __name__ == "__main__":
     from picarx import Picarx
