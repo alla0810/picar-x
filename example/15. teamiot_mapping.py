@@ -34,6 +34,7 @@ class PicarXMapping:
             distance = self.check_distance()
             self.mark_obstacle(angle, distance)
         self.print_map()
+        self.set_cam_pan_angle(0)        
 
     def mark_obstacle(self, angle, distance):
         """ Mark obstacle location on the map """
