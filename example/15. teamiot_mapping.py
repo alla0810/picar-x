@@ -81,9 +81,12 @@ class PicarXMapping:
 
     def print_map(self):
         """ Print the current map representation """
+        RED = "\033[41m  \033[0m"  # Red background for obstacles (1)
+        WHITE = "\033[47m  \033[0m" # White background for empty space (0)
+
         print("\nCurrent Map:")
         for row in self.grid:
-            print(" ".join(map(str, row)))
+            print("".join(RED if cell == 1 else WHITE for cell in row))
 
 if __name__ == "__main__":
     from picarx import Picarx
