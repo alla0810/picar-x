@@ -86,7 +86,7 @@ class PicarXMapping:
 
 if __name__ == "__main__":
     from picarx import Picarx
-    px = PicarX()
+    px = Picarx()
     mapper = PicarXMapping(px)
     mapper.run_mapping(velocity=10, time_interval=5)
 
