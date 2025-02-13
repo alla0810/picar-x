@@ -48,7 +48,7 @@ class Picarx(object):
         self.config_flie = fileDB(config, 777, os.getlogin())
 
         # --------- servos init ---------
-        self.cam_pan = Servo(servo_pins[0])s
+        self.cam_pan = Servo(servo_pins[0])
         self.cam_tilt = Servo(servo_pins[1])   
         self.dir_servo_pin = Servo(servo_pins[2])
         # get calibration values
