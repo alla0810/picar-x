@@ -532,7 +532,7 @@ class TeamIoT_SmartNavigator:
             print("Path clear, moving ahead...")
             await self.set_steering(0)
             
-            if await self.forward(speed=self.forward_speed, duration=0.5)
+            if await self.forward(speed=self.forward_speed, duration=0.5):
                 # If we complete the forward motion without emergency stop
                 self.position = (x, y)
                 break
