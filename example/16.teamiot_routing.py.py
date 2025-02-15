@@ -1,0 +1,454 @@
+#!/usr/bin/env python3
+"""
+Team IoT - CS437: Internet of Things
+Lab 1B - Step 8: Smart Navigation with Advanced Mapping
+Members: Mohammad Tamim, Jacob Fuehne, Jeffery Fan, KyoSook Shin
+NetIDs: tamim2, jfuehne2, jfan16, kyosook2
+
+Core capabilities:
+- Basic hardware control (motors, servos, sensors)
+- Movement functions (forward, backward, turning)
+- Advanced mapping using ultrasonic scanning
+- A* path planning with obstacle avoidance
+"""
+
+from picarx import Picarx
+import time
+import math
+import numpy as np
+from heapq import heappush, heappop
+
+
+class TeamIoT_SmartNavigator:
+    def __init__(self):
+        # Main interface to control the car
+        self.px = Picarx()
+
+        # Movement speeds (tweak these values during testing)
+        self.forward_speed = 25       # Regular cruising speed; adjust as needed.
+        self.slow_speed = 15          # Reduced speed for maneuvers/turns.
+        self.backup_speed = 8         # Reverse speed for backing up safely.
+
+        # Distance thresholds (in centimeters)
+        self.safe_distance = 43       # Distance considered safe to move forward.
+        self.danger_distance = 19     # Distance triggering a backup maneuver.
+        self.very_danger_distance = 15  # Reserved for future use; not active here.
+
+        # Steering and sensor calibration
+        self.servo_offset = -6.1      # Calibration offset for the steering servo.
+                                     # Adjust this if the car doesn't drive straight.
+        
+        # Occupancy grid settings
+        self.map_size = 100           # Grid dimensions: 100 x 100 cells.
+        self.grid = np.zeros((self.map_size, self.map_size), dtype=int)
+        self.CELL_SIZE_CM = 2         # Each grid cell represents 2 cm in the real world.
+                                     # Tweak this if your mapping resolution needs to change.
+
+        # Initial position and orientation
+        self.position = (self.map_size - 10, 10)  # Starting cell (near bottom-right).
+        self.heading = 135            # Starting heading in degrees (facing top-left).
+                                     # Adjust if the car's initial orientation changes.
+
+        # Ultrasonic sensor scan settings
+        self.WIDE_SCAN_MIN = -80      # Leftmost scan angle (degrees).
+        self.WIDE_SCAN_MAX = 80       # Rightmost scan angle (degrees).
+        self.WIDE_STEP = 10           # Angle increment for wide scanning.
+                                     # Modify these if a wider or narrower scan is needed.
+
+        # Initialization: Center steering and sensor
+        self.set_steering(0)          # Set wheels straight.
+        self.px.set_cam_pan_angle(0)  # Set sensor to face forward.
+        time.sleep(0.2)               # Allow servos to settle.
+
+    def set_steering(self, angle):
+        """Fine control over our steering.
+
+        Args:
+            angle (int): Desired steering angle. The angle is clamped between -33 and 33.
+                         If the car is not steering straight, adjust the servo_offset.
+        """
+        angle = max(-33, min(33, angle))  # Ensure the angle is within safe limits.
+        # Adjust the servo angle with the calibration offset.
+        self.px.set_dir_servo_angle(angle + self.servo_offset)
+        time.sleep(0.2)  # Allow time for the steering to physically adjust.
+
+    def forward(self, speed=None, duration=None):
+        """Drive forward, optionally for a specific time.
+
+        Args:
+            speed (int, optional): Speed at which to drive forward.
+                                   Defaults to forward_speed.
+            duration (float, optional): Duration (in seconds) for forward motion.
+                                        Useful for moving exactly one grid cell.
+        """
+        if speed is None:
+            speed = self.forward_speed
+        self.px.forward(speed)
+        if duration:
+            time.sleep(duration)
+            self.stop()
+
+    def backward(self, speed=None, duration=0.7):
+        """Back up, usually when we're too close to an obstacle.
+
+        Args:
+            speed (int, optional): Speed for backing up.
+                                   Defaults to backup_speed.
+            duration (float, optional): Time to back up (seconds).
+                                        Adjust if more/less backing up is needed.
+        """
+        if speed is None:
+            speed = self.backup_speed
+        self.px.backward(speed)
+        time.sleep(duration)
+        self.stop()
+
+    def stop(self):
+        """Come to a full stop."""
+        self.px.forward(0)
+
+    def read_ultrasonic(self, samples=5):
+        """Get accurate distance reading by averaging multiple samples.
+
+        Args:
+            samples (int, optional): Number of sensor readings to average.
+        Returns:
+            float: Averaged distance reading.
+        """
+        total = 0
+        count = 0
+        for _ in range(samples):
+            d = self.px.ultrasonic.read()
+            if 0 <= d <= 200:  # Only consider valid readings.
+                total += d
+                count += 1
+            time.sleep(0.03)
+        if count == 0:
+            return 100  # Default fallback if no valid reading.
+        return total / count
+
+    def scan_angle(self, angle, settle=0.2):
+        """Point the sensor in a specific direction and get a distance reading.
+
+        Args:
+            angle (int): Angle in degrees to which the sensor is directed.
+            settle (float, optional): Delay for sensor to stabilize.
+        Returns:
+            float: Measured distance at that angle.
+        """
+        self.px.set_cam_pan_angle(angle)
+        time.sleep(settle)  # Wait for the sensor to settle.
+        return self.read_ultrasonic(samples=3)
+
+    def scan3(self):
+        """Quick check: measure distances to the left, center, and right.
+
+        Returns:
+            dict: Distance readings for keys "left", "center", and "right".
+        """
+        left_d = self.scan_angle(-80)
+        center_d = self.scan_angle(0)
+        right_d = self.scan_angle(80)
+        self.px.set_cam_pan_angle(0)  # Reset sensor to face forward.
+        time.sleep(0.1)
+        return {"left": left_d, "center": center_d, "right": right_d}
+
+    def wide_scan(self):
+        """
+        Build a map of our surroundings by scanning in a wide arc.
+        
+        The sensor sweeps from left to right. For each angle, if the distance
+        is less than our safe threshold, the corresponding grid cells are marked
+        as obstacles. Finally, the updated map is visualized.
+        """
+        print("\n--- Starting Wide Area Scan ---")
+        for angle in range(self.WIDE_SCAN_MIN, self.WIDE_SCAN_MAX + 1, self.WIDE_STEP):
+            dist = self.scan_angle(angle)
+            if dist < self.safe_distance:
+                self.mark_obstacle(angle, dist)
+        self.px.set_cam_pan_angle(0)  # Reset sensor to center.
+        self.print_map()
+
+    def mark_obstacle(self, sensor_angle, dist_cm):
+        """
+        Record an obstacle on our map with a safety buffer.
+
+        The obstacle is marked not only at the detected distance, but in a small range
+        (±5 cm) around it. This accounts for the car's size and increases safety.
+
+        Args:
+            sensor_angle (int): Angle at which the obstacle is detected.
+            dist_cm (float): Distance reading in centimeters.
+        """
+        if dist_cm >= self.safe_distance:
+            return
+        total_angle = self.heading + sensor_angle  # Combine car's heading with sensor angle.
+        rad = math.radians(total_angle)
+        # The range of cells marked (±5 cm) can be adjusted if needed.
+        for r in range(int(dist_cm - 5), int(dist_cm + 5), 2):
+            if r < 0:
+                continue
+            # Convert real-world distance to grid coordinates.
+            gx = (math.cos(rad) * r) / self.CELL_SIZE_CM
+            gy = (math.sin(rad) * r) / self.CELL_SIZE_CM
+            px = int(self.position[0] + gx)
+            py = int(self.position[1] + gy)
+            # Ensure we don't mark outside the grid.
+            if 0 <= px < self.map_size and 0 <= py < self.map_size:
+                self.grid[py, px] = 1
+
+    def print_map(self):
+        """
+        Display the current environment map using ANSI colors.
+        
+        - Red ("1") indicates an obstacle.
+        - Green ("0") indicates a clear space.
+        
+        This visualization helps to debug and fine-tune the mapping process.
+        """
+        RED = "\033[31m"    # Red color for obstacles.
+        GREEN = "\033[32m"  # Green color for clear paths.
+        RESET = "\033[0m"   # Reset color to default.
+        
+        rows = np.any(self.grid == 1, axis=1)
+        cols = np.any(self.grid == 1, axis=0)
+        if not np.any(rows) or not np.any(cols):
+            print("Map is empty - no obstacles detected")
+            return
+        r_indices = np.where(rows)[0]
+        c_indices = np.where(cols)[0]
+        rmin, rmax = r_indices[0], r_indices[-1]
+        cmin, cmax = c_indices[0], c_indices[-1]
+        # Add a margin around the detected area.
+        margin = 2
+        rmin = max(rmin - margin, 0)
+        rmax = min(rmax + margin, self.map_size - 1)
+        cmin = max(cmin - margin, 0)
+        cmax = min(cmax + margin, self.map_size - 1)
+        
+        print("\nCurrent Environment Map (Red=obstacle, Green=clear):")
+        for row in self.grid[rmin:rmax+1, cmin:cmax+1]:
+            print("".join(f"{RED}1{RESET}" if c else f"{GREEN}0{RESET}" for c in row))
+
+    def find_path(self, gx, gy):
+        """
+        Compute the best path to the goal using the A* search algorithm.
+
+        This function:
+          - Validates the goal cell (ensuring it's not an obstacle).
+          - Uses eight-directional movement to compute the path.
+          - Returns a list of grid cells from the current position to the goal.
+        
+        Args:
+            gx (int): Goal cell x-coordinate.
+            gy (int): Goal cell y-coordinate.
+        Returns:
+            list or None: The computed path as a list of grid cells, or None if blocked.
+        """
+        def heuristic(a, b):
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
+        start = self.position
+        goal = (gx, gy)
+        if self.grid[goal[1], goal[0]] == 1:
+            return None  # The goal cell is blocked.
+        frontier = []
+        heappush(frontier, (0, start))
+        came_from = {start: None}
+        cost_so_far = {start: 0}
+        moves = [(1, 0), (-1, 0), (0, 1), (0, -1),
+                 (1, 1), (-1, 1), (1, -1), (-1, -1)]
+        while frontier:
+            _, current = heappop(frontier)
+            if current == goal:
+                # Reconstruct the path from goal to start.
+                path = []
+                while current is not None:
+                    path.append(current)
+                    current = came_from[current]
+                path.reverse()
+                return path
+            for dx, dy in moves:
+                nx = current[0] + dx
+                ny = current[1] + dy
+                if 0 <= nx < self.map_size and 0 <= ny < self.map_size:
+                    if self.grid[ny, nx] == 0:  # Only travel through clear cells.
+                        new_cost = cost_so_far[current] + 1
+                        if (nx, ny) not in cost_so_far or new_cost < cost_so_far[(nx, ny)]:
+                            cost_so_far[(nx, ny)] = new_cost
+                            priority = new_cost + heuristic((nx, ny), goal)
+                            heappush(frontier, (priority, (nx, ny)))
+                            came_from[(nx, ny)] = current
+        return None
+
+    def pick_best_direction(self, dists, target=None):
+        """
+        Decide which direction to steer based on sensor readings.
+
+        Strategy:
+          1. Prefer going straight if it is safe.
+          2. If both left and right are safe and a target is provided,
+             bias toward the target.
+          3. Otherwise, choose the direction with more clearance.
+          4. If no safe direction exists, return "none".
+        
+        Args:
+            dists (dict): Readings for "left", "center", and "right".
+            target (tuple, optional): Target grid cell (x,y).
+        Returns:
+            str: "left", "center", "right", or "none".
+        """
+        candidates = {k: v for k, v in dists.items() if v >= self.safe_distance}
+        if not candidates:
+            return "none"
+        if "center" in candidates:
+            cdist = candidates["center"]
+            ldist = candidates.get("left", -1)
+            rdist = candidates.get("right", -1)
+            if cdist >= ldist and cdist >= rdist:
+                return "center"
+        if target is not None and "left" in candidates and "right" in candidates:
+            cx, cy = self.position
+            tx, ty = target
+            return "left" if tx < cx else "right"
+        if candidates.get("left", -1) > candidates.get("right", -1):
+            return "left"
+        elif candidates.get("right", -1) > candidates.get("left", -1):
+            return "right"
+        else:
+            return "left"  # Default to left if uncertain.
+
+    def pivot_turn(self, direction, duration=1.2, forward=True):
+        """
+        Execute a sharp pivot turn to avoid obstacles.
+
+        This maneuver uses a fixed steering angle for a brief period,
+        then resets to straight. You can adjust the fixed angles if the car
+        does not turn as expected.
+
+        Args:
+            direction (str): "left" or "right".
+            duration (float, optional): Base duration for the turn.
+            forward (bool, optional): Pivot while moving forward if True;
+                                      otherwise, pivot while backing up.
+        """
+        if direction == "left":
+            steering_angle = -20  # Tune this value for a sharper or gentler left turn.
+            print("  Turning LEFT to avoid obstacle")
+        else:
+            steering_angle = 18   # Tune this value for a sharper or gentler right turn.
+            print("  Turning RIGHT to avoid obstacle")
+        self.set_steering(steering_angle)
+        if forward:
+            self.forward(speed=self.slow_speed, duration=duration * 1.8)
+        else:
+            self.backward(speed=self.slow_speed, duration=duration * 1.0)
+        self.set_steering(0)  # Reset steering to center after the turn.
+
+    def move_to_cell(self, x, y):
+        """
+        Navigate cell-by-cell toward a target grid cell.
+
+        The function:
+          - Continuously checks for obstacles.
+          - Moves forward if the path is clear.
+          - Backs up if too close to an obstacle.
+          - Scans and pivots if an obstacle is detected.
+        Updates the internal position once the target cell is reached.
+
+        Args:
+            x (int): Target cell x-coordinate.
+            y (int): Target cell y-coordinate.
+        """
+        print(f"\nNavigating to position ({x}, {y})")
+        backup_attempts = 0
+
+        while True:
+            dist = self.read_ultrasonic()
+
+            # If the path is clear, move forward one cell.
+            if dist >= self.safe_distance:
+                print("Path clear, moving ahead...")
+                self.set_steering(0)
+                self.forward(speed=self.forward_speed, duration=0.5)  # Duration tuned for one cell's length.
+                self.position = (x, y)  # Update our internal map position.
+                break
+
+            # If too close to an obstacle, back up.
+            if dist < self.danger_distance:
+                print("Too close! Backing up to avoid collision...")
+                self.backward(duration=1.0)  # Adjust backing up duration if necessary.
+                backup_attempts += 1
+                continue
+
+            # Otherwise, scan for alternative routes.
+            print("Obstacle detected - scanning alternative routes...")
+            scans = self.scan3()
+            print(f"Distance readings: {scans}")
+            best_dir = self.pick_best_direction(scans, target=(x, y))
+
+            if best_dir == "none":
+                print("No clear path found - backing up further...")
+                self.backward(duration=1.0)
+                backup_attempts += 1
+            elif best_dir == "center":
+                print("Center path clear - proceeding cautiously...")
+                self.forward(speed=self.slow_speed, duration=0.8)
+            elif best_dir == "left":
+                print("Pivot turning left to avoid obstacle...")
+                self.pivot_turn("left", duration=1.5, forward=True)
+            elif best_dir == "right":
+                print("Pivot turning right to avoid obstacle...")
+                self.pivot_turn("right", duration=1.5, forward=True)
+
+            time.sleep(0.2)  # Small pause between maneuvers.
+
+    def navigate_to_goal(self, gx, gy):
+        """
+        Plan and execute a complete route to the goal cell.
+
+        Steps:
+          1. Update the map via a wide scan.
+          2. Compute a path from the current position to the goal using A*.
+          3. Follow the computed path cell-by-cell while avoiding obstacles.
+          4. Stop once the goal cell is reached.
+
+        Args:
+            gx (int): Goal cell x-coordinate.
+            gy (int): Goal cell y-coordinate.
+        Returns:
+            bool: True if the goal is reached; False otherwise.
+        """
+        print(f"\nPlanning route to goal ({gx}, {gy})...")
+        self.wide_scan()
+        path = self.find_path(gx, gy)
+        if not path:
+            print("No path found!")
+            return False
+
+        cells = path[1:]  # Skip the current cell.
+        for idx, cell in enumerate(cells):
+            self.move_to_cell(*cell)
+            if cell == (gx, gy):
+                print("\nFinal cell reached (goal). Stopping.")
+                self.stop()
+                return True
+
+        print("\nArrived at goal!")
+        return True
+
+
+def main():
+    """Start up our smart navigation system."""
+    try:
+        print("\n=== Team IoT - Smart Navigation System ===")
+        nav = TeamIoT_SmartNavigator()
+        nav.navigate_to_goal(85, 15)  # Goal cell coordinates (adjust as needed)
+    except KeyboardInterrupt:
+        print("\nNavigation stopped by user")
+    finally:
+        nav.stop()
+        print("System shutdown complete")
+
+
+if __name__ == "__main__":
+    main()
