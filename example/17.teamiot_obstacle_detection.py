@@ -23,6 +23,7 @@ from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
 from picamera2 import Picamera2
 from utils import visualize
+import asyncio
 
 class TeamIoT_SmartNavigator:
     def __init__(self):
@@ -67,8 +68,8 @@ class TeamIoT_SmartNavigator:
 
 
         # Movement speeds (tweak these values during testing)
-        self.forward_speed = 25       # Regular cruising speed; adjust as needed.
-        self.slow_speed = 15          # Reduced speed for maneuvers/turns.
+        self.forward_speed = 10       # Regular cruising speed; adjust as needed.
+        self.slow_speed = 10          # Reduced speed for maneuvers/turns.
         self.backup_speed = 8         # Reverse speed for backing up safely.
 
         # Distance thresholds (in centimeters)
@@ -77,17 +78,20 @@ class TeamIoT_SmartNavigator:
         self.very_danger_distance = 15  # Reserved for future use; not active here.
 
         # Steering and sensor calibration
-        self.servo_offset = -6.1      # Calibration offset for the steering servo.
+        ### Do not use servo_offset, instead, use `sudo python3 calibration/calibration.py`
+        # keeping this here in case extra offset is needed by someone's kit.
+        self.servo_offset = 0      # Calibration offset for the steering servo.
                                      # Adjust this if the car doesn't drive straight.
         
         # Occupancy grid settings
-        self.map_size = 100           # Grid dimensions: 100 x 100 cells.
+        self.map_size = 150           # Grid dimensions: 100 x 100 cells.
         self.grid = np.zeros((self.map_size, self.map_size), dtype=int)
         self.CELL_SIZE_CM = 2         # Each grid cell represents 2 cm in the real world.
                                      # Tweak this if your mapping resolution needs to change.
 
         # Initial position and orientation
-        self.position = (self.map_size - 10, 10)  # Starting cell (near bottom-right).
+        # self.position = (self.map_size - 10, 10)  # Starting cell (near bottom-right).
+        self.position = (10, 10)
         self.heading = 135            # Starting heading in degrees (facing top-left).
                                      # Adjust if the car's initial orientation changes.
 
@@ -97,10 +101,37 @@ class TeamIoT_SmartNavigator:
         self.WIDE_STEP = 10           # Angle increment for wide scanning.
                                      # Modify these if a wider or narrower scan is needed.
 
-        # Initialization: Center steering and sensor
-        self.set_steering(0)          # Set wheels straight.
+        # Add monitoring control flags
+        self.monitoring_task = None
+        self.is_moving = False
+
+
+    def initialize_servos(self):
+        """Initialize the servos and wheels to 0.  Seperate from set_steering because we need a reset that's not async
+
+        Args:
+            angle (int): Desired steering angle. The angle is clamped between -33 and 33.
+                         If the car is not steering straight, adjust the servo_offset.
+        """
+        angle = 0 # set angles to 0
+        # Adjust the servo angle with the calibration offset.
+        self.px.set_dir_servo_angle(angle + self.servo_offset) 
+        time.sleep(0.2)  # Allow time for the steering to physically adjust.
         self.px.set_cam_pan_angle(0)  # Set sensor to face forward.
         time.sleep(0.2)               # Allow servos to settle.
+
+    async def set_steering(self, angle):
+        """Fine control over our steering.
+
+        Args:
+            angle (int): Desired steering angle. The angle is clamped between -33 and 33.
+                         If the car is not steering straight, adjust the servo_offset.
+        """
+        angle = max(-33, min(33, angle))  # Ensure the angle is within safe limits.
+        # Adjust the servo angle with the calibration offset.
+        self.px.set_dir_servo_angle(angle + self.servo_offset)
+        time.sleep(0.2)  # Allow time for the steering to physically adjust.
+
 
     def _process_detection(self, detection_result, image, timestamp_ms):
         """Process detection results and update visualization."""
@@ -134,19 +165,7 @@ class TeamIoT_SmartNavigator:
                 return True
         return False
 
-    def set_steering(self, angle):
-        """Fine control over our steering.
-
-        Args:
-            angle (int): Desired steering angle. The angle is clamped between -33 and 33.
-                         If the car is not steering straight, adjust the servo_offset.
-        """
-        angle = max(-33, min(33, angle))  # Ensure the angle is within safe limits.
-        # Adjust the servo angle with the calibration offset.
-        self.px.set_dir_servo_angle(angle + self.servo_offset)
-        time.sleep(0.2)  # Allow time for the steering to physically adjust.
-
-    def forward(self, speed=None, duration=None):
+    async def forward(self, speed=None, duration=None):
         """Drive forward, optionally for a specific time.
 
         Args:
@@ -157,12 +176,28 @@ class TeamIoT_SmartNavigator:
         """
         if speed is None:
             speed = self.forward_speed
+            
+        # Start the monitoring before moving
+        await self.start_monitoring()
+        
+        # Start moving
         self.px.forward(speed)
-        if duration:
-            time.sleep(duration)
+        
+        try:
+            if duration:
+                # Check monitoring_task status periodically
+                start_time = time.time()
+                while time.time() - start_time < duration:
+                    if not self.is_moving or self.monitoring_task.done():
+                        # Monitoring task detected an obstacle and stopped
+                        return False
+                    await asyncio.sleep(0.05)  # Short sleep to allow other tasks to run
+                return True
+        finally:
             self.stop()
+            self.stop_monitoring()
 
-    def backward(self, speed=None, duration=0.7):
+    async def backward(self, speed=None, duration=0.7):
         """Back up, usually when we're too close to an obstacle.
 
         Args:
@@ -174,14 +209,15 @@ class TeamIoT_SmartNavigator:
         if speed is None:
             speed = self.backup_speed
         self.px.backward(speed)
-        time.sleep(duration)
+        await asyncio.sleep(duration)
         self.stop()
 
     def stop(self):
         """Come to a full stop."""
         self.px.forward(0)
+        self.stop_monitoring()
 
-    def read_ultrasonic(self, samples=5):
+    async def read_ultrasonic(self, samples=5):
         """Get accurate distance reading by averaging multiple samples.
 
         Args:
@@ -193,10 +229,11 @@ class TeamIoT_SmartNavigator:
         count = 0
         for _ in range(samples):
             d = self.px.ultrasonic.read()
+            # print(d)
             if 0 <= d <= 200:  # Only consider valid readings.
                 total += d
                 count += 1
-            time.sleep(0.03)
+            await asyncio.sleep(0.03)
         if count == 0:
             return 100  # Default fallback if no valid reading.
         return total / count
@@ -221,7 +258,7 @@ class TeamIoT_SmartNavigator:
         """Update and show the camera feed with object detection visualization."""
         image = self.picam2.capture_array()
         image = cv2.resize(image, (640, 480))
-        image = cv2.flip(image, -1)
+        # image = cv2.flip(image, -1)
 
         # Add FPS counter
         fps_text = f'FPS = {self.fps:.1f}'
@@ -245,7 +282,40 @@ class TeamIoT_SmartNavigator:
             cv2.imshow('Smart Navigator - Object Detection', self.detection_frame)
         cv2.waitKey(1)
 
-    def scan_angle(self, angle, settle=0.2):
+    async def ultrasonic_monitor(self):
+        """
+        Continously check the ultrasonic monitor to see what's in front of us so we stop running into walls or objects.  Coincidentally, this also helps handle "dynamic objects" better.
+        """
+        while self.is_moving:
+            try:
+                # print("monitoring...")
+                distance = await self.read_ultrasonic(samples=2)  # Reduced samples for faster response
+                if distance < self.danger_distance:
+                    print("danger")
+                    self.stop()
+                    self.is_moving = False
+                    break
+                await asyncio.sleep(0.05)  # Small delay between readings
+            except Exception as e:
+                print(f"Error in ultrasonic monitor: {e}")
+                self.stop()
+                self.is_moving = False
+                break
+
+    async def start_monitoring(self):
+        """Start the background ultrasonic monitoring."""
+        if not self.monitoring_task:
+            self.is_moving = True
+            self.monitoring_task = asyncio.create_task(self.ultrasonic_monitor())
+
+    def stop_monitoring(self):
+        """Stop the background ultrasonic monitoring."""
+        self.is_moving = False
+        if self.monitoring_task:
+            self.monitoring_task.cancel()
+            self.monitoring_task = None
+    
+    async def scan_angle(self, angle, settle=0.2):
         """Point the sensor in a specific direction and get a distance reading.
 
         Args:
@@ -255,23 +325,24 @@ class TeamIoT_SmartNavigator:
             float: Measured distance at that angle.
         """
         self.px.set_cam_pan_angle(angle)
-        time.sleep(settle)  # Wait for the sensor to settle.
-        return self.read_ultrasonic(samples=3)
+        await asyncio.sleep(settle)  # Wait for the sensor to settle.
+        return await self.read_ultrasonic(samples=3)
 
-    def scan3(self):
+    async def scan3(self):
         """Quick check: measure distances to the left, center, and right.
 
         Returns:
             dict: Distance readings for keys "left", "center", and "right".
         """
-        left_d = self.scan_angle(-80)
-        center_d = self.scan_angle(0)
-        right_d = self.scan_angle(80)
+        left_d = await self.scan_angle(-80)
+        center_d = await self.scan_angle(0)
+        right_d = await self.scan_angle(80)
         self.px.set_cam_pan_angle(0)  # Reset sensor to face forward.
-        time.sleep(0.1)
+        await asyncio.sleep(0.1)
+        self.print_map()
         return {"left": left_d, "center": center_d, "right": right_d}
 
-    def wide_scan(self):
+    async def wide_scan(self, step_size=1, sweep_delay=0.0005):
         """
         Build a map of our surroundings by scanning in a wide arc.
         
@@ -280,12 +351,20 @@ class TeamIoT_SmartNavigator:
         as obstacles. Finally, the updated map is visualized.
         """
         print("\n--- Starting Wide Area Scan ---")
-        for angle in range(self.WIDE_SCAN_MIN, self.WIDE_SCAN_MAX + 1, self.WIDE_STEP):
-            dist = self.scan_angle(angle)
+        # Sweep from left to right
+        for angle in range(self.WIDE_SCAN_MIN, self.WIDE_SCAN_MAX + 1, step_size):
+            self.px.set_cam_pan_angle(angle)  # Move the servo to the desired angle
+            await asyncio.sleep(sweep_delay)  # Allow time for movement stabilization
+            
+            dist = await self.read_ultrasonic(samples=3)  # Take distance readings
+            
             if dist < self.safe_distance:
-                self.mark_obstacle(angle, dist)
-        self.px.set_cam_pan_angle(0)  # Reset sensor to center.
+                self.mark_obstacle(angle, dist)  # Mark obstacle in the map
+
+        # Return servo to the center position
+        self.px.set_cam_pan_angle(0)
         self.print_map()
+
 
     def mark_obstacle(self, sensor_angle, dist_cm):
         """
@@ -298,22 +377,35 @@ class TeamIoT_SmartNavigator:
             sensor_angle (int): Angle at which the obstacle is detected.
             dist_cm (float): Distance reading in centimeters.
         """
-        if dist_cm >= self.safe_distance:
-            return
-        total_angle = self.heading + sensor_angle  # Combine car's heading with sensor angle.
+        total_angle = self.heading + sensor_angle  # Combine car's heading with sensor angle
         rad = math.radians(total_angle)
-        # The range of cells marked (±5 cm) can be adjusted if needed.
-        for r in range(int(dist_cm - 5), int(dist_cm + 5), 2):
-            if r < 0:
-                continue
-            # Convert real-world distance to grid coordinates.
+        
+        # First mark the clear path up to the obstacle (or full path if no obstacle)
+        safe_dist = min(dist_cm, self.safe_distance)
+        for r in range(0, int(safe_dist), 2):
+            # Convert polar coordinates to grid coordinates
             gx = (math.cos(rad) * r) / self.CELL_SIZE_CM
             gy = (math.sin(rad) * r) / self.CELL_SIZE_CM
             px = int(self.position[0] + gx)
             py = int(self.position[1] + gy)
-            # Ensure we don't mark outside the grid.
+            
+            # Mark as safe if within grid bounds
             if 0 <= px < self.map_size and 0 <= py < self.map_size:
-                self.grid[py, px] = 1
+                self.grid[py, px] = 0
+        
+        # If we detected an obstacle within safe distance, mark it and its buffer zone
+        if dist_cm < self.safe_distance:
+            # Mark the obstacle and a buffer zone (±5 cm) around it
+            for r in range(int(dist_cm - 5), int(dist_cm + 5), 2):
+                if r < 0:
+                    continue
+                gx = (math.cos(rad) * r) / self.CELL_SIZE_CM
+                gy = (math.sin(rad) * r) / self.CELL_SIZE_CM
+                px = int(self.position[0] + gx)
+                py = int(self.position[1] + gy)
+                
+                if 0 <= px < self.map_size and 0 <= py < self.map_size:
+                    self.grid[py, px] = 1
 
     def print_map(self):
         """
@@ -435,7 +527,7 @@ class TeamIoT_SmartNavigator:
         else:
             return "left"  # Default to left if uncertain.
 
-    def pivot_turn(self, direction, duration=1.2, forward=True):
+    async def pivot_turn(self, direction, duration=1.2, forward=True):
         """
         Execute a sharp pivot turn to avoid obstacles.
 
@@ -453,16 +545,17 @@ class TeamIoT_SmartNavigator:
             steering_angle = -20  # Tune this value for a sharper or gentler left turn.
             print("  Turning LEFT to avoid obstacle")
         else:
-            steering_angle = 18   # Tune this value for a sharper or gentler right turn.
+            steering_angle = 20   # Tune this value for a sharper or gentler right turn.
             print("  Turning RIGHT to avoid obstacle")
-        self.set_steering(steering_angle)
+        await self.set_steering(steering_angle)
         if forward:
-            self.forward(speed=self.slow_speed, duration=duration * 1.8)
+            await self.forward(speed=self.slow_speed, duration=duration * 1.8)
         else:
-            self.backward(speed=self.slow_speed, duration=duration * 1.0)
-        self.set_steering(0)  # Reset steering to center after the turn.
+            await self.backward(speed=self.slow_speed, duration=duration * 1.0)
+        await self.set_steering(0)  # Reset steering to center after the turn.
 
-    def move_to_cell(self, x, y):
+
+    async def move_to_cell(self, x, y):
         """
         Navigate cell-by-cell toward a target grid cell.
 
@@ -478,55 +571,59 @@ class TeamIoT_SmartNavigator:
             y (int): Target cell y-coordinate.
         """
         print(f"\nNavigating to position ({x}, {y})")
-        backup_attempts = 0
+        # backup_attempts = 0
+        distance_from_object_in_front = await self.read_ultrasonic()
 
         while True:
-            start_time = time.time()
-            dist = self.read_ultrasonic()
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-            print("time elapsed: ", elapsed_time)
+            distance_from_object_in_front = await self.read_ultrasonic()
+            print(distance_from_object_in_front)
             if self.check_for_stop_sign():
                 print("Resuming navigation after stop sign...")
-
-            # If the path is clear, move forward one cell.
-            if dist >= self.safe_distance:
-                print("Path clear, moving ahead...")
-                self.set_steering(0)
-                self.forward(speed=self.forward_speed, duration=0.5)  # Duration tuned for one cell's length.
-                self.position = (x, y)  # Update our internal map position.
+            
+            if await self.forward(speed=self.forward_speed, duration=0.5):
+                # If we complete the forward motion without emergency stop
+                self.position = (x, y)
                 break
-
-            # If too close to an obstacle, back up.
-            if dist < self.danger_distance:
+            else:
                 print("Too close! Backing up to avoid collision...")
-                self.backward(duration=1.0)  # Adjust backing up duration if necessary.
-                backup_attempts += 1
-                continue
+                await self.backward(duration=0.5)
+            # # If the path is clear, move forward one cell.
+            # if dist >= self.safe_distance:
+            #     print("Path clear, moving ahead...")
+            #     self.set_steering(0)
+            #     self.forward(speed=self.forward_speed, duration=0.5)  # Duration tuned for one cell's length.
+            #     self.position = (x, y)  # Update our internal map position.
+            #     break
+
+            # # If too close to an obstacle, back up.
+            # if dist < self.danger_distance:
+            #     print("Too close! Backing up to avoid collision...")
+            #     self.backward(duration=1.0)  # Adjust backing up duration if necessary.
+            #     backup_attempts += 1
+            #     continue
 
             # Otherwise, scan for alternative routes.
             print("Obstacle detected - scanning alternative routes...")
-            scans = self.scan3()
+            scans = await self.scan3()
             print(f"Distance readings: {scans}")
             best_dir = self.pick_best_direction(scans, target=(x, y))
 
             if best_dir == "none":
                 print("No clear path found - backing up further...")
-                self.backward(duration=1.0)
-                backup_attempts += 1
+                await self.backward(duration=1.0)
             elif best_dir == "center":
                 print("Center path clear - proceeding cautiously...")
-                self.forward(speed=self.slow_speed, duration=0.8)
+                await self.forward(speed=self.slow_speed, duration=0.8)
             elif best_dir == "left":
                 print("Pivot turning left to avoid obstacle...")
-                self.pivot_turn("left", duration=1.5, forward=True)
+                await self.pivot_turn("left", duration=1.5, forward=True)
             elif best_dir == "right":
                 print("Pivot turning right to avoid obstacle...")
-                self.pivot_turn("right", duration=1.5, forward=True)
+                await self.pivot_turn("right", duration=1.5, forward=True)
 
-            time.sleep(0.2)  # Small pause between maneuvers.
+            await asyncio.sleep(0.2)  # Small pause between maneuvers.
 
-    def navigate_to_goal(self, gx, gy):
+    async def navigate_to_goal(self, gx, gy):
         """
         Plan and execute a complete route to the goal cell.
 
@@ -544,7 +641,7 @@ class TeamIoT_SmartNavigator:
         """
         print(f"\nPlanning route to goal ({gx}, {gy})...")
         try:
-            self.wide_scan()
+            await self.wide_scan()
             path = self.find_path(gx, gy)
             if not path:
                 print("No path found!")
@@ -552,7 +649,7 @@ class TeamIoT_SmartNavigator:
 
             cells = path[1:]
             for idx, cell in enumerate(cells):
-                self.move_to_cell(*cell)
+                await self.move_to_cell(*cell)
                 self.update_display()  # Update display during navigation
                 if cell == (gx, gy):
                     print("\nFinal cell reached (goal). Stopping.")
@@ -570,18 +667,17 @@ class TeamIoT_SmartNavigator:
 
 
 
-def main():
+async def main():
     """Start up our smart navigation system."""
     try:
         print("\n=== Team IoT - Smart Navigation System ===")
         nav = TeamIoT_SmartNavigator()
-        nav.navigate_to_goal(85, 15)  # Goal cell coordinates (adjust as needed)
+        nav.initialize_servos()
+        await nav.navigate_to_goal(100, 15)  # Goal cell coordinates (adjust as needed)
     except KeyboardInterrupt:
         print("\nNavigation stopped by user")
     finally:
         nav.stop()
         print("System shutdown complete")
 
-
-if __name__ == "__main__":
-    main()
+asyncio.run(main())
