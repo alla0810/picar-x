@@ -97,6 +97,7 @@ class TeamIoT_SmartNavigator:
         self.position = (55, 90)
         # self.heading = 135            # Starting heading in degrees (facing top-left).
         self.heading = 0
+        self.goal_position = (55, 10)
                                      # Adjust if the car's initial orientation changes.
 
         # Ultrasonic sensor scan settings
@@ -410,7 +411,7 @@ class TeamIoT_SmartNavigator:
             
         return new_heading
 
-    async def update_position(self, movement_type, duration, speed, steering_angle=0):
+    def update_position(self, movement_type, duration, speed, steering_angle=0):
         """
         Update position based on movement type and parameters.
         
@@ -473,6 +474,34 @@ class TeamIoT_SmartNavigator:
         self.position = (new_x, new_y)
         print(f"Updated position: ({new_x:.1f}, {new_y:.1f})")
     
+        # def update_position(self, distance, heading_angle=None):
+        # """
+        # Update the car's position based on distance traveled and heading.
+        
+        # Args:
+        #     distance (float): Distance traveled in cm (negative for reverse)
+        #     heading_angle (float, optional): Override current heading if provided
+        # """
+        # # Use provided heading if available, otherwise use current heading
+        # angle = heading_angle if heading_angle is not None else self.heading
+        
+        # # Convert heading to radians
+        # rad = math.radians(angle)
+        
+        # # Calculate position changes in grid coordinates
+        # dx = (distance * math.cos(rad)) / self.CELL_SIZE_CM
+        # dy = (distance * math.sin(rad)) / self.CELL_SIZE_CM
+        
+        # # Update position
+        # new_x = self.position[0] + dx
+        # new_y = self.position[1] + dy
+        
+        # # Ensure we stay within grid bounds
+        # new_x = max(0, min(self.map_size - 1, new_x))
+        # new_y = max(0, min(self.map_size - 1, new_y))
+        
+        # self.position = (new_x, new_y)
+        # print(f"Updated position: ({new_x:.1f}, {new_y:.1f}), Heading: {angle:.1f}°")
     def mark_obstacle(self, sensor_angle, dist_cm):
         """
         Record an obstacle on our map with a safety buffer.
@@ -487,7 +516,7 @@ class TeamIoT_SmartNavigator:
 
         total_angle = self.heading + sensor_angle  # Combine car's heading with sensor angle
         rad = math.radians(total_angle)
-        
+        print("marking obstacles")
         # First mark the clear path up to the obstacle (or full path if no obstacle)
         safe_dist = min(dist_cm, self.safe_distance)
         for r in range(0, int(safe_dist), 2):
@@ -515,38 +544,95 @@ class TeamIoT_SmartNavigator:
                 if 0 <= px < self.map_size and 0 <= py < self.map_size:
                     self.grid[py, px] = 1
 
+    # def print_map(self):
+    #     """
+    #     Display the current environment map using ANSI colors.
+        
+    #     - Red ("1") indicates an obstacle.
+    #     - Green ("0") indicates a clear space.
+        
+    #     This visualization helps to debug and fine-tune the mapping process.
+    #     """
+    #     RED = "\033[31m"    # Red color for obstacles.
+    #     GREEN = "\033[32m"  # Green color for clear paths.
+    #     RESET = "\033[0m"   # Reset color to default.
+        
+    #     rows = np.any(self.grid == 1, axis=1)
+    #     cols = np.any(self.grid == 1, axis=0)
+    #     if not np.any(rows) or not np.any(cols):
+    #         print("Map is empty - no obstacles detected")
+    #         return
+    #     r_indices = np.where(rows)[0]
+    #     c_indices = np.where(cols)[0]
+    #     rmin, rmax = r_indices[0], r_indices[-1]
+    #     cmin, cmax = c_indices[0], c_indices[-1]
+    #     # Add a margin around the detected area.
+    #     margin = 2
+    #     rmin = max(rmin - margin, 0)
+    #     rmax = min(rmax + margin, self.map_size - 1)
+    #     cmin = max(cmin - margin, 0)
+    #     cmax = min(cmax + margin, self.map_size - 1)
+        
+    #     print("\nCurrent Environment Map (Red=obstacle, Green=clear):")
+    #     for row in self.grid[rmin:rmax+1, cmin:cmax+1]:
+    #         print("".join(f"{RED}1{RESET}" if c else f"{GREEN}0{RESET}" for c in row))
+
     def print_map(self):
         """
-        Display the current environment map using ANSI colors.
+        Display the complete environment map using ANSI colors.
         
-        - Red ("1") indicates an obstacle.
-        - Green ("0") indicates a clear space.
-        
-        This visualization helps to debug and fine-tune the mapping process.
+        - Red ("1") indicates an obstacle
+        - Green ("0") indicates a clear space
+        - Blue ("P") indicates the current position
+        - Yellow ("G") indicates the goal position
         """
-        RED = "\033[31m"    # Red color for obstacles.
-        GREEN = "\033[32m"  # Green color for clear paths.
-        RESET = "\033[0m"   # Reset color to default.
+        RED = "\033[31m"     # Red color for obstacles
+        GREEN = "\033[32m"   # Green color for clear paths
+        BLUE = "\033[34m"    # Blue color for current position
+        YELLOW = "\033[33m"  # Yellow color for goal position
+        RESET = "\033[0m"    # Reset color to default
         
-        rows = np.any(self.grid == 1, axis=1)
-        cols = np.any(self.grid == 1, axis=0)
-        if not np.any(rows) or not np.any(cols):
-            print("Map is empty - no obstacles detected")
-            return
-        r_indices = np.where(rows)[0]
-        c_indices = np.where(cols)[0]
-        rmin, rmax = r_indices[0], r_indices[-1]
-        cmin, cmax = c_indices[0], c_indices[-1]
-        # Add a margin around the detected area.
-        margin = 2
-        rmin = max(rmin - margin, 0)
-        rmax = min(rmax + margin, self.map_size - 1)
-        cmin = max(cmin - margin, 0)
-        cmax = min(cmax + margin, self.map_size - 1)
+        print("\nCurrent Environment Map:")
+        print(f"{RED}1{RESET}=obstacle, {GREEN}0{RESET}=clear, {BLUE}P{RESET}=position, {YELLOW}G{RESET}=goal")
         
-        print("\nCurrent Environment Map (Red=obstacle, Green=clear):")
-        for row in self.grid[rmin:rmax+1, cmin:cmax+1]:
-            print("".join(f"{RED}1{RESET}" if c else f"{GREEN}0{RESET}" for c in row))
+        # Convert position to integer coordinates for marking
+        pos_x, pos_y = int(round(self.position[0])), int(round(self.position[1]))
+        
+        # Get goal position from navigation target if it exists
+        if self.goal_position:
+            goal_x, goal_y = self.goal_position
+        else:
+            goal_x, goal_y = (-1,-1)
+        
+        # Print column numbers (coordinates) at the top
+        print("   ", end="")
+        for i in range(0, self.map_size, 10):
+            print(f"{i:10}", end="")
+        print()
+        
+        # Print the map with row numbers
+        for y in range(self.map_size):
+            # Print row number
+            print(f"{y:2} ", end="")
+            
+            for x in range(self.map_size):
+                if x == goal_x and y == goal_y:
+                    print(f"{YELLOW}G{RESET}", end="")
+                elif x == pos_x and y == pos_y:
+                    print(f"{BLUE}P{RESET}", end="")
+                elif self.grid[y, x] == 1:
+                    print(f"{RED}1{RESET}", end="")
+                else:
+                    print(f"{GREEN}0{RESET}", end="")
+            
+            # Print row number again at the end
+            print(f" {y:2}")
+        
+        # Print column numbers at the bottom
+        print("   ", end="")
+        for i in range(0, self.map_size, 10):
+            print(f"{i:10}", end="")
+        print()
 
     def find_path(self, gx, gy):
         """
@@ -565,6 +651,7 @@ class TeamIoT_SmartNavigator:
         """
         start = self.position
         goal = (gx, gy)
+        self.goal_position = goal
 
         if self.grid[goal[1], goal[0]] == 1:
             return None  # The goal cell is blocked.
@@ -599,34 +686,7 @@ class TeamIoT_SmartNavigator:
                             heappush(frontier, (priority, (nx, ny)))
                             came_from[(nx, ny)] = current
         return None
-    def update_position(self, distance, heading_angle=None):
-        """
-        Update the car's position based on distance traveled and heading.
-        
-        Args:
-            distance (float): Distance traveled in cm (negative for reverse)
-            heading_angle (float, optional): Override current heading if provided
-        """
-        # Use provided heading if available, otherwise use current heading
-        angle = heading_angle if heading_angle is not None else self.heading
-        
-        # Convert heading to radians
-        rad = math.radians(angle)
-        
-        # Calculate position changes in grid coordinates
-        dx = (distance * math.cos(rad)) / self.CELL_SIZE_CM
-        dy = (distance * math.sin(rad)) / self.CELL_SIZE_CM
-        
-        # Update position
-        new_x = self.position[0] + dx
-        new_y = self.position[1] + dy
-        
-        # Ensure we stay within grid bounds
-        new_x = max(0, min(self.map_size - 1, new_x))
-        new_y = max(0, min(self.map_size - 1, new_y))
-        
-        self.position = (new_x, new_y)
-        print(f"Updated position: ({new_x:.1f}, {new_y:.1f}), Heading: {angle:.1f}°")
+
 
     def pick_best_direction(self, dists, target=None):
         """
@@ -700,7 +760,7 @@ class TeamIoT_SmartNavigator:
         
         arc_distance = speed * duration * (1.8 if forward else 1.0)
 
-        self.heading = await self.calculate_new_heading(
+        self.heading = self.calculate_new_heading(
             direction, 
             abs(steering_angle),
             duration * (1.8 if forward else 1.0),
@@ -830,7 +890,7 @@ async def main():
         print("\n=== Team IoT - Smart Navigation System ===")
         nav = TeamIoT_SmartNavigator()
         nav.initialize_servos()
-        await nav.navigate_to_goal(100, 15)  # Goal cell coordinates (adjust as needed)
+        await nav.navigate_to_goal(55, 10)  # Goal cell coordinates (adjust as needed)
     except KeyboardInterrupt:
         print("\nNavigation stopped by user")
     finally:
