@@ -84,20 +84,24 @@ class TeamIoT_SmartNavigator:
                                      # Adjust this if the car doesn't drive straight.
         
         # Occupancy grid settings
-        self.map_size = 150           # Grid dimensions: 100 x 100 cells.
+        self.map_size = 100           # Grid dimensions: 100 x 100 cells. #mostly arbitrary
         self.grid = np.zeros((self.map_size, self.map_size), dtype=int)
-        self.CELL_SIZE_CM = 2         # Each grid cell represents 2 cm in the real world.
+        # self.CELL_SIZE_CM = 2         # Each grid cell represents 2 cm in the real world.
+        self.CELL_SIZE_CM = 2.54        # we uses inches in 'merica.  1 inch = 2.54 cm
+                                        # (using this so we can map the course with a tape measure)
                                      # Tweak this if your mapping resolution needs to change.
-
+        self.wheelbase = 8.89 #3.5 inches / 8.89 cm between axles of the Picar-X 
         # Initial position and orientation
         # self.position = (self.map_size - 10, 10)  # Starting cell (near bottom-right).
-        self.position = (10, 10)
-        self.heading = 135            # Starting heading in degrees (facing top-left).
+        # self.position = (10, 10)
+        self.position = (55, 90)
+        # self.heading = 135            # Starting heading in degrees (facing top-left).
+        self.heading = 0
                                      # Adjust if the car's initial orientation changes.
 
         # Ultrasonic sensor scan settings
-        self.WIDE_SCAN_MIN = -80      # Leftmost scan angle (degrees).
-        self.WIDE_SCAN_MAX = 80       # Rightmost scan angle (degrees).
+        self.WIDE_SCAN_MIN = -90      # Leftmost scan angle (degrees).
+        self.WIDE_SCAN_MAX = 90       # Rightmost scan angle (degrees).
         self.WIDE_STEP = 10           # Angle increment for wide scanning.
                                      # Modify these if a wider or narrower scan is needed.
 
@@ -190,8 +194,13 @@ class TeamIoT_SmartNavigator:
                 while time.time() - start_time < duration:
                     if not self.is_moving or self.monitoring_task.done():
                         # Monitoring task detected an obstacle and stopped
+                        time_elapsed = time.time() - start_time
+                        distance = speed * time_elapsed ###### THIS MIGHT NEEDS ADJUSTING!!! #############
+                        self.update_position(distance)
                         return False
                     await asyncio.sleep(0.05)  # Short sleep to allow other tasks to run
+                distance = speed * duration * 0.8  # 0.8 is a correction factor
+                self.update_position(distance)
                 return True
         finally:
             self.stop()
@@ -210,6 +219,8 @@ class TeamIoT_SmartNavigator:
             speed = self.backup_speed
         self.px.backward(speed)
         await asyncio.sleep(duration)
+        distance = -speed * duration
+        self.update_position(distance)
         self.stop()
 
     def stop(self):
@@ -365,7 +376,103 @@ class TeamIoT_SmartNavigator:
         self.px.set_cam_pan_angle(0)
         self.print_map()
 
+    def calculate_new_heading(self, turn_direction, steering_angle, duration, speed):
+        """
+        Calculate the new heading after a turn based on steering angle, duration, and speed.
+        
+        Args:
+            turn_direction (str): "left" or "right"
+            steering_angle (float): Angle of the wheels in degrees
+            duration (float): Duration of the turn in seconds
+            speed (float): Speed of the car during the turn
+            
+        Returns:
+            float: New heading in degrees (0-360)
+        """
+        # Constants for turn radius calculation
+        # Distance between front and rear axles in cm
 
+        
+        # Calculate turn radius (refer: Ackermann Steering Geometry formula)
+        turn_radius = abs(self.wheelbase / math.tan(math.radians(steering_angle)))
+        
+        # Calculate distance traveled during turn
+        distance = speed * duration
+        
+        # Calculate angle changed during turn (arc length / radius)
+        angle_change = math.degrees(distance / turn_radius)
+        
+        # Adjust angle based on turn direction
+        if turn_direction == "left":
+            new_heading = (self.heading + angle_change) % 360
+        else:  # right turn
+            new_heading = (self.heading - angle_change) % 360
+            
+        return new_heading
+
+    async def update_position(self, movement_type, duration, speed, steering_angle=0):
+        """
+        Update position based on movement type and parameters.
+        
+        Args:
+            movement_type (str): "forward", "backward", or "turn"
+            duration (float): Duration of movement in seconds
+            speed (float): Speed of movement
+            steering_angle (float): Angle of steering for turns (degrees)
+        """
+        # Convert speed from arbitrary units to cm/s
+        SPEED_TO_CM = 15.0  # Calibration factor: speed of 10 ≈ 15 cm/s
+        distance = (speed * SPEED_TO_CM * duration)  # Distance in cm
+        
+        if movement_type in ["forward", "backward"]:
+            # For straight movements, use heading to calculate new position
+            rad_heading = math.radians(self.heading)
+            dx = distance * math.cos(rad_heading)
+            dy = distance * math.sin(rad_heading)
+            
+            # Reverse direction if backing up
+            if movement_type == "backward":
+                dx = -dx
+                dy = -dy
+                
+        elif movement_type == "turn":
+            # Calculate turn radius
+            turn_radius = abs(self.wheelbase / math.tan(math.radians(steering_angle))) if steering_angle != 0 else float('inf')
+            
+            # Calculate angle traversed in radians
+            angle_traversed = distance / turn_radius if turn_radius != float('inf') else 0
+            
+            # Calculate change in position based on arc movement
+            if steering_angle > 0:  # Right turn
+                angle_traversed = -angle_traversed
+            
+            # Initial heading in radians
+            initial_heading_rad = math.radians(self.heading)
+            
+            # Calculate position change using arc formulas
+            if turn_radius != float('inf'):
+                dx = turn_radius * (math.sin(initial_heading_rad + angle_traversed) - math.sin(initial_heading_rad))
+                dy = turn_radius * (math.cos(initial_heading_rad) - math.cos(initial_heading_rad + angle_traversed))
+            else:
+                # Straight line movement if turn_radius is infinite
+                dx = distance * math.cos(initial_heading_rad)
+                dy = distance * math.sin(initial_heading_rad)
+        
+        # Convert position change from cm to grid cells
+        dx_cells = dx / self.CELL_SIZE_CM
+        dy_cells = dy / self.CELL_SIZE_CM
+        
+        # Update position
+        new_x = self.position[0] + dx_cells
+        new_y = self.position[1] + dy_cells
+        
+        # Ensure we stay within grid bounds
+        new_x = max(0, min(new_x, self.map_size - 1))
+        new_y = max(0, min(new_y, self.map_size - 1))
+        
+        self.position = (new_x, new_y)
+        print(f"Updated position: ({new_x:.1f}, {new_y:.1f})")
+    
     def mark_obstacle(self, sensor_angle, dist_cm):
         """
         Record an obstacle on our map with a safety buffer.
@@ -377,6 +484,7 @@ class TeamIoT_SmartNavigator:
             sensor_angle (int): Angle at which the obstacle is detected.
             dist_cm (float): Distance reading in centimeters.
         """
+
         total_angle = self.heading + sensor_angle  # Combine car's heading with sensor angle
         rad = math.radians(total_angle)
         
@@ -455,12 +563,14 @@ class TeamIoT_SmartNavigator:
         Returns:
             list or None: The computed path as a list of grid cells, or None if blocked.
         """
-        def heuristic(a, b):
-            return abs(a[0] - b[0]) + abs(a[1] - b[1])
         start = self.position
         goal = (gx, gy)
+
         if self.grid[goal[1], goal[0]] == 1:
             return None  # The goal cell is blocked.
+
+        def heuristic(a, b):
+            return abs(a[0] - b[0]) + abs(a[1] - b[1])
         frontier = []
         heappush(frontier, (0, start))
         came_from = {start: None}
@@ -489,6 +599,34 @@ class TeamIoT_SmartNavigator:
                             heappush(frontier, (priority, (nx, ny)))
                             came_from[(nx, ny)] = current
         return None
+    def update_position(self, distance, heading_angle=None):
+        """
+        Update the car's position based on distance traveled and heading.
+        
+        Args:
+            distance (float): Distance traveled in cm (negative for reverse)
+            heading_angle (float, optional): Override current heading if provided
+        """
+        # Use provided heading if available, otherwise use current heading
+        angle = heading_angle if heading_angle is not None else self.heading
+        
+        # Convert heading to radians
+        rad = math.radians(angle)
+        
+        # Calculate position changes in grid coordinates
+        dx = (distance * math.cos(rad)) / self.CELL_SIZE_CM
+        dy = (distance * math.sin(rad)) / self.CELL_SIZE_CM
+        
+        # Update position
+        new_x = self.position[0] + dx
+        new_y = self.position[1] + dy
+        
+        # Ensure we stay within grid bounds
+        new_x = max(0, min(self.map_size - 1, new_x))
+        new_y = max(0, min(self.map_size - 1, new_y))
+        
+        self.position = (new_x, new_y)
+        print(f"Updated position: ({new_x:.1f}, {new_y:.1f}), Heading: {angle:.1f}°")
 
     def pick_best_direction(self, dists, target=None):
         """
@@ -542,16 +680,35 @@ class TeamIoT_SmartNavigator:
                                       otherwise, pivot while backing up.
         """
         if direction == "left":
-            steering_angle = -20  # Tune this value for a sharper or gentler left turn.
+            steering_angle = -30  # Tune this value for a sharper or gentler left turn.
             print("  Turning LEFT to avoid obstacle")
         else:
-            steering_angle = 20   # Tune this value for a sharper or gentler right turn.
+            steering_angle = 30   # Tune this value for a sharper or gentler right turn.
             print("  Turning RIGHT to avoid obstacle")
         await self.set_steering(steering_angle)
+
+        # Calculate turn parameters
+        turn_radius = abs(self.wheelbase / math.tan(math.radians(abs(steering_angle))))
+        
+        # Execute the turn
+        speed = self.slow_speed
         if forward:
             await self.forward(speed=self.slow_speed, duration=duration * 1.8)
         else:
             await self.backward(speed=self.slow_speed, duration=duration * 1.0)
+            speed = -speed #don't actually send negatives to self.backward(), for math only
+        
+        arc_distance = speed * duration * (1.8 if forward else 1.0)
+
+        self.heading = await self.calculate_new_heading(
+            direction, 
+            abs(steering_angle),
+            duration * (1.8 if forward else 1.0),
+            speed
+        )
+        self.update_position(arc_distance, self.heading)
+        print(f"  New heading: {self.heading:.1f}°")
+
         await self.set_steering(0)  # Reset steering to center after the turn.
 
 
@@ -572,11 +729,11 @@ class TeamIoT_SmartNavigator:
         """
         print(f"\nNavigating to position ({x}, {y})")
         # backup_attempts = 0
-        distance_from_object_in_front = await self.read_ultrasonic()
+        # distance_from_object_in_front = await self.read_ultrasonic()
 
         while True:
-            distance_from_object_in_front = await self.read_ultrasonic()
-            print(distance_from_object_in_front)
+            # distance_from_object_in_front = await self.read_ultrasonic()
+            # print(distance_from_object_in_front)
             if self.check_for_stop_sign():
                 print("Resuming navigation after stop sign...")
             
