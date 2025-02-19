@@ -1,3 +1,10 @@
+# UIUC MCS CS437 Internet of Things Project
+This git is to conduct group projects of UIUC MCS CS437 course for the following memebers
+- Tamin
+- Jacob
+- Jeffery
+- KyoSook
+
 # Picar-X
 
 Picar-X Python library for Raspberry Pi.
